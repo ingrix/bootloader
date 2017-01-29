@@ -20,7 +20,7 @@ install: all
 	dd if=$(PROG) of=$(HDDIMG) bs=$(BLSIZE) count=1 conv=notrunc 2>&1
 	printf "\x55\xaa" | ( dd of=$(HDDIMG) bs=1 count=2 conv=notrunc seek=$(MAGICOFFSET) 2>&1 ) > /dev/null
 
-run:
+run: 
 	( qemu-system-x86_64 --enable-kvm -hda $(HDDIMG) 2>&1 ) > /dev/null &
 
 init-hdd:

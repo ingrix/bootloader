@@ -17,8 +17,10 @@ _start: cli #disable interrupts until we get everything set up right
   movw $256, %cx # 256 words in MBR
   xorw %ax, %ax
   movw %ax, %ds
+  movw %ax, %es
   movw $0x600, %di # move us to 0x600
   movw $0x7c00, %si # copy from load address, 0x7c00
+  cld
   rep movsw
 
   # jump to the relocated region and normalize cs:ip
@@ -36,18 +38,6 @@ real_start:
   # BIOS should leave the boot drive number in %dl; save it
   pushw %dx
 
-  #sti # re-enable interrupts
-
-  xorw %dx, %dx
-
-  # read increasing memory addresses
-  cld 
-
-  # Move cursor to row 1 col 1
-  #movb $0x1, %dh
-  #movb $0x1, %ah
-  #int $0x10
-
   # determine the active partition
   movw $4, %cx # only 4 partitions in DOS format
   movw $part_table, %si
@@ -59,7 +49,7 @@ bootdetect:
   addw $0x10, %si # next part. entry
   loop bootdetect
 
-  jmp boot_err # no boot partition found, error
+  jmp nobootparterr # no boot partition found, error
   
 bootok:
 
@@ -71,62 +61,44 @@ bootok:
   movw $0x55aa, %bx # magic number
   movb $0x41, %ah
   int $0x13
-  jc nodriveext # general bios error
+  jc drivereaderr # general bios error
   cmpw $0xaa55, %bx # test drive extensions installed
-  jne nodriveext
+  jne nolba
   andw $1, %cx # test for LBA
   jz nolba
 
-  # print loading message
-  #movw $load_msg, %di
-  #call print_msg
-
-  #mov %dx, %di
-  #call print_val_hex
-  #jmp loop
-
   # copy the LBA address of the drive partition to the disk address packet
   popw %si
-  pushw %si
   leaw 8(%si), %si
   movw $disk_abs_block_num, %di
   movw $4, %cx
+  cld
   rep movsb
 
   movb $0x42, %ah
   movw $disk_address_packet, %si
   movb -2(%bp), %dl # retrieve drive number to be safe
   int $0x13
-  jc diskloaderr
-  test %ah, %ah
-  jz diskloaderr
-  
-driveexterr:
-  movw $drivecallerrmsg, %di
-  call print_msg
-  jmp loop
+  jc drivereaderr
 
-nodriveext:
-  movw $driveexterrmsg, %di
+  # everything ok, print loading message
+  movw $load_msg, %di
   call print_msg
-  jmp loop
+  ljmp $0,$0x7c00
+  
+drivereaderr:
+  movw $drivereaderrmsg, %di
+  jmp do_err
 
 nolba:
-  movw $lbaerrmsg, %di
-  call print_msg
-  jmp loop
+  movw $nolbaerrmsg, %di
+  jmp do_err
 
-diskloaderr:
-  movw $diskloaderrmsg, %di
-  call print_msg
-  movw %ax, %di
-  call print_val_hex
-  jmp loop
+nobootparterr:
+  movw $nobootparterrmsg, %di
 
-boot_err:
-  movw $booterrmsg, %di
+do_err:
   call print_msg
-  #jmp loop
 
 # do nothing 
 loop:
@@ -134,7 +106,7 @@ loop:
 
 
 # %di contains address of msg to print
-# # stomps %ax, %si
+# stomps %ax, %si
 print_msg:
   movw %di, %si
 
@@ -152,7 +124,6 @@ print_msg:
   jmp .Lprintstart
 .Lendprint:
   ret
-.set print_msg_len, . - print_msg
 
 # char should be in %al
 print_char:
@@ -160,59 +131,49 @@ print_char:
   int $0x10
   ret
 
-
 # print value in hexadecimal with leading '0x'
 # pass value in %di
 # stomps %ax, %cx, %di
 # no return value
 print_val_hex:
   movw $2, %cx # at least print 0x
-pstart:
+.Lpstart:
   movw %di, %ax
   andw $0x000F, %ax
   addb $'0', %al # numeric characters
   
   cmpb $'9', %al
-  jle ppush # value was less than 10, don't do anything else
+  jle .Lppush # value was less than 10, don't do anything else
 
   # greater than '9', so add a enough to get to 'A'
   addb $7, %al
 
-ppush:
+.Lppush:
   pushw %ax
   inc %cx
 
   shr $4, %di
   testw %di, %di
-  jz pend
-  jmp pstart
+  jz .Lpend
+  jmp .Lpstart
 
-pend:
+.Lpend:
   # add 0x to the end
   pushw $'x'
   pushw $'0'
-pprint:
-
+.Lpprint:
   popw %ax
-  #movb $0x0e, %ah
-  #int $0x10
   call print_char
-  loop pprint
+  loop .Lpprint
 
   ret
 
-load_msg: .asciz "Loading drive "
-newline: .asciz "\r\n"
-booterrmsg: .asciz "No bootable drive"
-drivecallerrmsg: 
-driveexterrmsg: .asciz "Drive ext error"
-lbaerrmsg: .asciz "no LBA"
-diskloaderrmsg: .asciz "Sector load error "
-
-#kern_magic: .ascii "HdrS"
-#kern_err_msg: .asciz "Kern magic failed\r\n"
-#kern_magic_test: .ascii "HdrS"
-#.set kern_magic_size, 4
+load_msg: .asciz "Loading... "
+#newline: .asciz "\r\n"
+drivereaderrmsg: .asciz "drive read failed"
+nobootparterrmsg: .asciz "no boot partition"
+nolbaerrmsg: .asciz "no LBA"
+diskloaderrmsg: .asciz "sector load error "
 
 . = _start + 0x19e
 disk_address_packet:
@@ -232,31 +193,12 @@ boot_sig:
   .byte 0x55
   .byte 0xaa
 
-# Send byte in %si
-# stomps basically all of the registers
-#print_byte_hex:
-#
-#  movw $hexchars, %di
-#  andw $0x00FF, %si # clear upper byte of %si
-#
-#  movw %si, %bx
-#  andb $0xF0, %bl
-#  shr $4, %bl
-#
-#  movb (%bx,%di), %al
-#
-#  movb $0x0e, %ah
-#  int $0x10
-#
-#  movw %si, %bx
-#  andb $0x0F, %bl
-#
-#  movb (%bx,%di), %al
-#
-#  movb $0x0e, %ah
-#  int $0x10
-#
-#  ret
+# Linux kernel stuff, not implemented yet
+
+#kern_magic: .ascii "HdrS"
+#kern_err_msg: .asciz "Kern magic failed\r\n"
+#kern_magic_test: .ascii "HdrS"
+#.set kern_magic_size, 4
 
 # compare kernel magic values
 # requires %di to be set to address to compare
